@@ -28,14 +28,14 @@ const App = () => {
   useEffect(() => {
     const handleUnload = () => {
       connectedTopics.forEach(topic => {
-        fetch("http://localhost:8000/unsubscribe_ntfy", {
+        fetch("https://zeonixk-ai-guard-api.hf.space/unsubscribe_ntfy", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ topic: topic }),
           keepalive: true 
         });
       });
-      fetch("http://localhost:8000/clear_logs", {
+      fetch("https://zeonixk-ai-guard-api.hf.space/clear_logs", {
         method: "DELETE",
         keepalive: true
       });
@@ -47,11 +47,11 @@ const App = () => {
 
   const fetchDashboardData = async () => {
     try {
-      const logRes = await axios.get("http://localhost:8000/get_latest_alerts");
+      const logRes = await axios.get("https://zeonixk-ai-guard-api.hf.space/get_latest_alerts");
       setLogs(logRes.data.alerts);
 
       if (source && status !== "finished" && !isLocalWebcam) {
-        const statusRes = await axios.get("http://localhost:8000/stream_status");
+        const statusRes = await axios.get("https://zeonixk-ai-guard-api.hf.space/stream_status");
         setProgress(statusRes.data.progress);
         setStatus(statusRes.data.status);
       }
@@ -80,9 +80,9 @@ const App = () => {
     formData.append("file", file);
 
     try {
-      await axios.post("http://localhost:8000/upload_video", formData);
+      await axios.post("https://zeonixk-ai-guard-api.hf.space/upload_video", formData);
       setTimeout(() => {
-        setSource(`http://localhost:8000/video_feed?t=${Date.now()}`);
+        setSource(`https://zeonixk-ai-guard-api.hf.space/video_feed?t=${Date.now()}`);
       }, 1000);
     } catch (err) {
       alert("Upload failed. Make sure backend is running.");
@@ -107,7 +107,7 @@ const App = () => {
         // const session = await ort.InferenceSession.create('/yolov8n.onnx');
         
         // When the ONNX model detects a threat locally, push it to the backend to trigger SMS!
-        // await axios.post("http://localhost:8000/register_incident", {
+        // await axios.post("https://zeonixk-ai-guard-api.hf.space/register_incident", {
         //   event_type: "Weapon Detected",
         //   timestamp: new Date().toLocaleTimeString(),
         //   timestamp_val: Date.now() / 1000
@@ -145,10 +145,10 @@ const App = () => {
     } else if (link) {
       // SECURE BACKEND RTSP PROXY (Hides IP)
       try {
-        await axios.post("http://localhost:8000/set_stream", { url: link });
+        await axios.post("https://zeonixk-ai-guard-api.hf.space/set_stream", { url: link });
         setIsLocalWebcam(false);
         setIsLive(true); 
-        setSource(`http://localhost:8000/video_feed?t=${Date.now()}`);
+        setSource(`https://zeonixk-ai-guard-api.hf.space/video_feed?t=${Date.now()}`);
         setStatus("playing");
         setProgress(100); 
         setShowRtspModal(false);
@@ -163,7 +163,7 @@ const App = () => {
 
   const handleClearLogs = async () => {
     try {
-      await axios.delete("http://localhost:8000/clear_logs");
+      await axios.delete("https://zeonixk-ai-guard-api.hf.space/clear_logs");
       setLogs([]);
     } catch (e) {
       console.error("Failed to clear logs", e);
@@ -172,7 +172,7 @@ const App = () => {
 
   const handleDownloadReport = async () => {
     try {
-      const response = await axios.get("http://localhost:8000/download_final_report", {
+      const response = await axios.get("https://zeonixk-ai-guard-api.hf.space/download_final_report", {
         responseType: 'blob', 
       });
       const url = window.URL.createObjectURL(new Blob([response.data]));
@@ -192,9 +192,9 @@ const App = () => {
       if (action === "restart" && !isLocalWebcam) {
         setStatus("playing");
         setProgress(0);
-        setSource(`http://localhost:8000/video_feed?t=${Date.now()}`);
+        setSource(`https://zeonixk-ai-guard-api.hf.space/video_feed?t=${Date.now()}`);
       } else if (!isLocalWebcam) {
-        await axios.post("http://localhost:8000/control_stream", { action });
+        await axios.post("https://zeonixk-ai-guard-api.hf.space/control_stream", { action });
       }
     } catch (e) {
       console.error("Failed to control stream", e);
@@ -208,7 +208,7 @@ const App = () => {
         if (animationRef.current) cancelAnimationFrame(animationRef.current);
         setIsLocalWebcam(false);
       } else {
-        await axios.post("http://localhost:8000/control_stream", { action: "stop" });
+        await axios.post("https://zeonixk-ai-guard-api.hf.space/control_stream", { action: "stop" });
         setSource(null);
       }
       setStatus("idle");
@@ -228,7 +228,7 @@ const App = () => {
     }
 
     try {
-      await axios.post("http://localhost:8000/subscribe_ntfy", { topic: newTopic });
+      await axios.post("https://zeonixk-ai-guard-api.hf.space/subscribe_ntfy", { topic: newTopic });
       setConnectedTopics([...connectedTopics, newTopic]); 
       setNtfyTopicInput(""); 
     } catch (e) {
@@ -239,7 +239,7 @@ const App = () => {
 
   const handleRemoveTopic = async (topicToRemove) => {
     try {
-      await axios.post("http://localhost:8000/unsubscribe_ntfy", { topic: topicToRemove });
+      await axios.post("https://zeonixk-ai-guard-api.hf.space/unsubscribe_ntfy", { topic: topicToRemove });
       setConnectedTopics(connectedTopics.filter(t => t !== topicToRemove));
     } catch (e) {
       console.error("Failed to disconnect", e);
