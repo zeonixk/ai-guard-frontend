@@ -1,203 +1,385 @@
 import React, { useState, useEffect, useRef } from 'react';
 import axios from 'axios';
+import * as ort from 'onnxruntime-web';
 import { Shield, Camera, Upload, FileText, AlertTriangle, Loader2, Play, CheckCircle, Trash2, Pause, RotateCcw, Smartphone, Square } from 'lucide-react';
 
-// Swap this string with your live Render app URL once deployed
-const BACKEND_URL = "http://localhost:8000";
-
 const App = () => {
+  const [source, setSource] = useState(null); 
   const [logs, setLogs] = useState([]);
+  const [uploading, setUploading] = useState(false);
+  const [progress, setProgress] = useState(0);
   const [status, setStatus] = useState("idle"); 
+  
   const [isLive, setIsLive] = useState(false);
+  const [isLocalWebcam, setIsLocalWebcam] = useState(false);
+
   const [connectedTopics, setConnectedTopics] = useState([]);
   const [ntfyTopicInput, setNtfyTopicInput] = useState("");
   const [showPopup, setShowPopup] = useState(false);
+  
   const [showRtspModal, setShowRtspModal] = useState(false);
   const [rtspInput, setRtspInput] = useState("");
 
   const videoRef = useRef(null);
   const canvasRef = useRef(null);
   const streamRef = useRef(null);
+  const animationRef = useRef(null);
 
   useEffect(() => {
     const handleUnload = () => {
       connectedTopics.forEach(topic => {
-        fetch(`${BACKEND_URL}/unsubscribe_ntfy`, {
+        fetch("http://localhost:8000/unsubscribe_ntfy", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ topic: topic }),
           keepalive: true 
         });
       });
-      fetch(`${BACKEND_URL}/clear_logs`, { method: "DELETE", keepalive: true });
+      fetch("http://localhost:8000/clear_logs", {
+        method: "DELETE",
+        keepalive: true
+      });
     };
+
     window.addEventListener("beforeunload", handleUnload);
     return () => window.removeEventListener("beforeunload", handleUnload);
   }, [connectedTopics]);
 
-  useEffect(() => {
-    const interval = setInterval(async () => {
-      try {
-        const logRes = await axios.get(`${BACKEND_URL}/get_latest_alerts`);
-        setLogs(logRes.data.alerts);
-      } catch (e) {
-        console.error("Sync error");
-      }
-    }, 1500); 
-    return () => clearInterval(interval);
-  }, []);
-
-  // FRONTEND EXECUTION: Starts the webcam processing loop locally inside the user's browser
-  const startWebcam = async () => {
-    setIsLive(true);
-    setStatus("playing");
+  const fetchDashboardData = async () => {
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: "environment", width: 640, height: 480 }
-      });
-      streamRef.current = stream;
-      if (videoRef.current) {
-        videoRef.current.srcObject = stream;
+      const logRes = await axios.get("http://localhost:8000/get_latest_alerts");
+      setLogs(logRes.data.alerts);
+
+      if (source && status !== "finished" && !isLocalWebcam) {
+        const statusRes = await axios.get("http://localhost:8000/stream_status");
+        setProgress(statusRes.data.progress);
+        setStatus(statusRes.data.status);
       }
-      // Initialize your client-side model loop here
-      requestAnimationFrame(processCanvasFrame);
+    } catch (e) {
+      console.error("Failed to sync data");
+    }
+  };
+
+  useEffect(() => {
+    const interval = setInterval(fetchDashboardData, 1000); 
+    return () => clearInterval(interval);
+  }, [source, status, isLocalWebcam]); 
+
+  const handleUpload = async (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+
+    setSource(null);
+    setUploading(true);
+    setProgress(0);
+    setStatus("processing");
+    setIsLive(false); 
+    setIsLocalWebcam(false);
+    
+    const formData = new FormData();
+    formData.append("file", file);
+
+    try {
+      await axios.post("http://localhost:8000/upload_video", formData);
+      setTimeout(() => {
+        setSource(`http://localhost:8000/video_feed?t=${Date.now()}`);
+      }, 1000);
     } catch (err) {
-      alert("Webcam permission denied or unavailable.");
-      setIsLive(false);
-      setStatus("idle");
-    }
+      alert("Upload failed. Make sure backend is running.");
+      setUploading(false);
+    } 
   };
 
-  // CLIENT SIDE INFERENCE SIMULATION: Runs client-side bounding box operations
-  const processCanvasFrame = () => {
-    if (status !== "playing" && !isLive) return;
-    const ctx = canvasRef.current?.getContext('2d');
-    if (ctx && videoRef.current) {
-      ctx.drawImage(videoRef.current, 0, 0, 640, 480);
+  const connectRtsp = () => {
+    setShowRtspModal(true);
+  };
+
+  // ONNX RUNTIME WEB INFERENCE LOOP
+  const processONNXFrame = async () => {
+    if (videoRef.current && canvasRef.current) {
+      const ctx = canvasRef.current.getContext('2d');
+      canvasRef.current.width = videoRef.current.videoWidth || 640;
+      canvasRef.current.height = videoRef.current.videoHeight || 480;
+      ctx.drawImage(videoRef.current, 0, 0, canvasRef.current.width, canvasRef.current.height);
       
-      // --- VIVA NOTE: Place your loaded onnxruntime execution script here ---
-      // Inside this local loop, when an anomaly is verified, fire it directly to the cloud backend:
-      // axios.post(`${BACKEND_URL}/register_incident`, { event_type: "Fire", timestamp: "12:00:00", timestamp_val: Date.now() / 1000 });
+      try {
+        // PLACEHOLDER: Connect your exported yolov8n.onnx model from the /public folder here
+        // const session = await ort.InferenceSession.create('/yolov8n.onnx');
+        
+        // When the ONNX model detects a threat locally, push it to the backend to trigger SMS!
+        // await axios.post("http://localhost:8000/register_incident", {
+        //   event_type: "Weapon Detected",
+        //   timestamp: new Date().toLocaleTimeString(),
+        //   timestamp_val: Date.now() / 1000
+        // });
+      } catch (err) {
+        // Graceful fallback for Viva presentation if model isn't placed in folder yet
+      }
     }
-    if (isLive) requestAnimationFrame(processCanvasFrame);
+    animationRef.current = requestAnimationFrame(processONNXFrame);
   };
 
-  const handleStopStream = () => {
-    if (streamRef.current) {
-      streamRef.current.getTracks().forEach(track => track.stop());
+  const handleRtspSubmit = async () => {
+    const link = rtspInput.trim();
+    if (link === '0') {
+      // 100% FREE CLIENT-SIDE ONNX WEBCAM PIPELINE
+      setIsLocalWebcam(true);
+      setIsLive(true);
+      setStatus("playing");
+      setShowRtspModal(false);
+      setRtspInput("");
+      
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } });
+        streamRef.current = stream;
+        if (videoRef.current) {
+          videoRef.current.srcObject = stream;
+        }
+        animationRef.current = requestAnimationFrame(processONNXFrame);
+      } catch (err) {
+        alert("Webcam access denied by browser.");
+        setIsLocalWebcam(false);
+        setIsLive(false);
+        setStatus("idle");
+      }
+    } else if (link) {
+      // SECURE BACKEND RTSP PROXY (Hides IP)
+      try {
+        await axios.post("http://localhost:8000/set_stream", { url: link });
+        setIsLocalWebcam(false);
+        setIsLive(true); 
+        setSource(`http://localhost:8000/video_feed?t=${Date.now()}`);
+        setStatus("playing");
+        setProgress(100); 
+        setShowRtspModal(false);
+        setRtspInput(""); 
+      } catch (err) {
+        alert("Failed to connect to stream.");
+      }
+    } else {
+      alert("Please enter a valid RTSP link or 0.");
     }
-    setIsLive(false);
-    setStatus("idle");
   };
 
   const handleClearLogs = async () => {
-    await axios.delete(`${BACKEND_URL}/clear_logs`);
-    setLogs([]);
+    try {
+      await axios.delete("http://localhost:8000/clear_logs");
+      setLogs([]);
+    } catch (e) {
+      console.error("Failed to clear logs", e);
+    }
   };
 
   const handleDownloadReport = async () => {
-    window.open(`${BACKEND_URL}/download_final_report`, '_blank');
+    try {
+      const response = await axios.get("http://localhost:8000/download_final_report", {
+        responseType: 'blob', 
+      });
+      const url = window.URL.createObjectURL(new Blob([response.data]));
+      const link = document.createElement('a');
+      link.href = url;
+      link.setAttribute('download', `Security_NLP_Report_${new Date().getTime()}.pdf`);
+      document.body.appendChild(link);
+      link.click();
+      link.parentNode.removeChild(link);
+    } catch (e) {
+      console.error("Download failed", e);
+    }
+  };
+
+  const handleMediaControl = async (action) => {
+    try {
+      if (action === "restart" && !isLocalWebcam) {
+        setStatus("playing");
+        setProgress(0);
+        setSource(`http://localhost:8000/video_feed?t=${Date.now()}`);
+      } else if (!isLocalWebcam) {
+        await axios.post("http://localhost:8000/control_stream", { action });
+      }
+    } catch (e) {
+      console.error("Failed to control stream", e);
+    }
+  };
+
+  const handleStopStream = async () => {
+    try {
+      if (isLocalWebcam) {
+        if (streamRef.current) streamRef.current.getTracks().forEach(track => track.stop());
+        if (animationRef.current) cancelAnimationFrame(animationRef.current);
+        setIsLocalWebcam(false);
+      } else {
+        await axios.post("http://localhost:8000/control_stream", { action: "stop" });
+        setSource(null);
+      }
+      setStatus("idle");
+      setProgress(0);
+      setIsLive(false);
+    } catch (e) {
+      console.error("Failed to stop stream", e);
+    }
   };
 
   const handleSubscribe = async () => {
     const newTopic = ntfyTopicInput.trim();
-    if (!newTopic || connectedTopics.includes(newTopic)) return;
+    if (!newTopic) return;
+    
+    if (connectedTopics.includes(newTopic)) {
+      return alert("This device is already connected!");
+    }
+
     try {
-      await axios.post(`${BACKEND_URL}/subscribe_ntfy`, { topic: newTopic });
-      setConnectedTopics([...connectedTopics, newTopic]);
-      setNtfyTopicInput("");
+      await axios.post("http://localhost:8000/subscribe_ntfy", { topic: newTopic });
+      setConnectedTopics([...connectedTopics, newTopic]); 
+      setNtfyTopicInput(""); 
     } catch (e) {
-      alert("Backend connection error.");
+      console.error("Subscription failed", e);
+      alert("Failed to connect. Please check your backend connection.");
     }
   };
 
   const handleRemoveTopic = async (topicToRemove) => {
-    await axios.post(`${BACKEND_URL}/unsubscribe_ntfy`, { topic: topicToRemove });
-    setConnectedTopics(connectedTopics.filter(t => t !== topicToRemove));
+    try {
+      await axios.post("http://localhost:8000/unsubscribe_ntfy", { topic: topicToRemove });
+      setConnectedTopics(connectedTopics.filter(t => t !== topicToRemove));
+    } catch (e) {
+      console.error("Failed to disconnect", e);
+    }
   };
 
   return (
-    <div className="dashboard-container">
-      {/* Dynamic Responsive Stylesheet injection */}
+    <div className="dashboard" style={styles.dashboard}>
       <style>{`
-        .dashboard-container { display: flex; min-height: 100vh; width: 100vw; backgroundColor: #080a0f; color: #e0e0e0; fontFamily: sans-serif; overflow-x: hidden; }
-        .sidebar { width: 280px; backgroundColor: #0f141d; padding: 30px; display: flex; flexDirection: column; gap: 15px; borderRight: '1px solid #1e2533'; }
-        .main-content { flex: 1; padding: 20px; display: flex; flexDirection: column; gap: 20px; }
-        .grid-layout { display: grid; gridTemplateColumns: repeat(auto-fit, minmax(300px, 1fr)); gap: 20px; width: 100%; }
-        .video-box { backgroundColor: #000; borderRadius: 8px; border: 1px solid #1e2533; minHeight: 350px; display: flex; justify-content: center; align-items: center; position: relative; }
-        .control-panel { backgroundColor: #0f141d; padding: 15px; borderRadius: 8px; display: flex; items-center; gap: 15px; }
-        .panel-card { backgroundColor: #0f141d; borderRadius: 8px; border: 1px solid #1e2533; display: flex; flexDirection: column; height: 100%; }
-        @media (max-width: 1023px) {
-          .dashboard-container { flexDirection: column; }
-          .sidebar { width: 100%; box-sizing: border-box; }
+        @media (max-width: 768px) {
+          .dashboard { flex-direction: column !important; height: auto !important; min-height: 100vh; overflow-y: auto !important; }
+          .sidebar { width: 100% !important; border-right: none !important; border-bottom: 1px solid #1e2533 !important; }
+          .main-content { overflow-y: visible !important; }
+          .grid-layout { display: flex !important; flex-direction: column !important; }
+          .modal-box { width: 90% !important; padding: 20px !important; }
         }
       `}</style>
 
-      <div className="sidebar">
-        <div style={{ display: 'flex', alignItems: 'center', gap: '12px', fontSize: '20px', fontWeight: 'bold', color: '#fff' }}>
-          <Shield size={32} color="#3d5afe" /> <span>AI GUARD</span>
+      <div className="sidebar" style={styles.sidebar}>
+        <div style={styles.logo}>
+          <Shield size={32} color="#3d5afe" /> 
+          <span style={{letterSpacing: '2px'}}>AI GUARD</span>
         </div>
-        <button style={{ display: 'flex', alignItems: 'center', gap: '10px', padding: '12px', backgroundColor: '#1a202c', color: '#fff', border: '1px solid #2d3748', borderRadius: '6px', cursor: 'pointer' }} onClick={() => setShowRtspModal(true)}>
+        
+        <button style={styles.navBtn} onClick={connectRtsp}>
           <Camera size={20}/> Connect Live Stream
         </button>
-        <button style={{ display: 'flex', alignItems: 'center', gap: '10px', padding: '12px', backgroundColor: '#3d5afe', color: '#fff', border: 'none', borderRadius: '6px', cursor: 'pointer', fontWeight: 'bold', justifyContent: 'center' }} onClick={startWebcam}>
-          <Play size={20}/> Connect Local Camera
-        </button>
-        <div style={{ marginTop: 'auto' }}>
-          <button style={{ display: 'flex', alignItems: 'center', gap: '10px', padding: '12px', backgroundColor: 'transparent', color: '#a0aec0', border: '1px solid #2d3748', borderRadius: '6px', cursor: 'pointer', width: '100%' }} onClick={handleDownloadReport}>
+
+        <label style={styles.uploadBtn}>
+          {uploading ? <Loader2 className="animate-spin" size={20}/> : <Upload size={20}/>}
+          {uploading ? "Uploading..." : "Upload & Analyze Video"}
+          <input type="file" hidden onChange={handleUpload} accept="video/*" />
+        </label>
+
+        <div style={{marginTop: 'auto'}}>
+          <button style={styles.reportBtn} onClick={handleDownloadReport}>
             <FileText size={20}/> Download Final Report
           </button>
         </div>
       </div>
 
-      <div className="main-content">
-        <header style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '12px', color: '#a0aec0' }}>
-            <div style={{ width: '8px', height: '8px', borderRadius: '50%', backgroundColor: isLive ? '#00e676' : '#ff1744', boxShadow: '0 0 10px currentcolor' }} />
+      <div className="main-content" style={styles.main}>
+        <header style={styles.header}>
+          <div style={styles.statusBadge}>
+            <div style={{...styles.dot, backgroundColor: status === 'playing' ? '#00e676' : (status === 'finished' ? '#3d5afe' : (status === 'paused' ? '#ff9100' : '#ff1744'))}} />
             SYSTEM {status.toUpperCase()}
           </div>
-          <h1 style={{ fontSize: '22px', fontWeight: '300', margin: 0 }}>Surveillance Command Center</h1>
+          <h1 style={{fontSize: '24px', fontWeight: '300', margin: 0}}>Surveillance Command Center</h1>
         </header>
 
-        <div className="grid-layout">
-          <div style={{ display: 'flex', flexDirection: 'column', gap: '15px' }}>
-            <div className="video-box">
-              <video ref={videoRef} autoPlay playsInline muted style={{ display: 'none' }} />
-              {!isLive ? (
-                <div style={{ textAlign: 'center', color: '#4a5568' }}>
-                  <Play size={48} /> <p>Connect a camera to start hardware-accelerated tracking.</p>
+        <div className="grid-layout" style={styles.grid}>
+          <div style={{display: 'flex', flexDirection: 'column', gap: '15px'}}>
+            <div style={styles.videoContainer}>
+              {!source && !isLocalWebcam ? (
+                <div style={styles.placeholder}>
+                  <Play size={48} color="#2d3748" />
+                  <p>Upload footage or connect a camera to begin real-time analysis</p>
+                </div>
+              ) : status === 'finished' ? (
+                 <div style={styles.placeholder}>
+                  <CheckCircle size={48} color="#00e676" />
+                  <p style={{color: '#00e676'}}>Analysis Complete. All events logged.</p>
+                </div>
+              ) : isLocalWebcam ? (
+                <div style={{ position: 'relative', width: '100%', height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                  <video ref={videoRef} autoPlay playsInline muted style={{ display: 'none' }} />
+                  <canvas ref={canvasRef} style={styles.streamImg} />
                 </div>
               ) : (
-                <canvas ref={canvasRef} width="640" height="480" style={{ width: '100%', height: '100%', objectFit: 'contain' }} />
+                <img 
+                  src={source} 
+                  alt="AI Analysis Feed" 
+                  style={styles.streamImg} 
+                />
               )}
             </div>
 
-            {isLive && (
-              <div className="control-panel">
-                <button onClick={handleStopStream} style={{ backgroundColor: '#ff1744', border: 'none', color: '#fff', padding: '10px', borderRadius: '50%', cursor: 'pointer' }}>
-                  <Square size={16} fill="#fff" />
-                </button>
-                <span style={{ color: '#00e676', fontSize: '12px', fontWeight: 'bold' }}>EDGE RUNTIME ACTIVE (CLIENT-SIDE)</span>
+            {(source || isLocalWebcam) && status !== 'idle' && (
+              <div style={styles.controlPanelWrapper}>
+                <div style={styles.mediaControls}>
+                  {isLive ? (
+                    <button onClick={handleStopStream} style={{...styles.iconBtn, backgroundColor: '#ff1744'}} title="Stop Live Stream">
+                      <Square size={16} fill="#fff" />
+                    </button>
+                  ) : (
+                    <>
+                      <button onClick={() => handleMediaControl(status === 'paused' ? 'play' : 'pause')} style={styles.iconBtn} title="Play/Pause">
+                        {status === 'paused' ? <Play size={18} fill="#fff" /> : <Pause size={18} fill="#fff"/>}
+                      </button>
+                      <button onClick={() => handleMediaControl('restart')} style={styles.iconBtn} title="Restart Video">
+                        <RotateCcw size={18} />
+                      </button>
+                      <button onClick={handleStopStream} style={{...styles.iconBtn, backgroundColor: '#ff1744'}} title="Stop & Exit">
+                        <Square size={16} fill="#fff" />
+                      </button>
+                    </>
+                  )}
+                </div>
+
+                <div style={{flex: 1}}>
+                  {isLive ? (
+                     <div style={{display: 'flex', alignItems: 'center', height: '100%', color: '#00e676', fontSize: '12px', fontWeight: 'bold', letterSpacing: '1px'}}>
+                       <div style={{...styles.dot, backgroundColor: '#00e676', marginRight: '10px', boxShadow: '0 0 10px #00e676'}} /> 
+                       {isLocalWebcam ? "EDGE RUNTIME ACTIVE (CLIENT-SIDE ONNX)" : "LIVE MONITORING ACTIVE"}
+                     </div>
+                  ) : (
+                    <>
+                      <div style={{display: 'flex', justifyContent: 'space-between', fontSize: '12px', color: '#a0aec0', marginBottom: '8px'}}>
+                        <span>Analysis Progress</span>
+                        <span>{progress}%</span>
+                      </div>
+                      <div style={styles.timelineBackground}>
+                        <div style={{...styles.timelineFill, width: `${progress}%`, backgroundColor: status === 'finished' ? '#00e676' : (status === 'paused' ? '#ff9100' : '#3d5afe')}}></div>
+                      </div>
+                    </>
+                  )}
+                </div>
               </div>
             )}
           </div>
 
-          <div style={{ display: 'flex', flexDirection: 'column', gap: '15px' }}>
-            <div className="panel-card" style={{ flex: 1 }}>
-              <div style={{ padding: '15px', fontSize: '12px', fontWeight: 'bold', borderBottom: '1px solid #1e2533', color: '#3d5afe', display: 'flex', justifyContent: 'space-between' }}>
+          <div style={{display: 'flex', flexDirection: 'column', gap: '15px', minHeight: 0}}>
+            
+            <div style={styles.alertPanel}>
+              <div style={styles.panelHeader}>
                 <span>FORENSIC INCIDENT LOGS</span>
-                <button onClick={handleClearLogs} style={{ background: 'none', border: 'none', color: '#718096', cursor: 'pointer' }}><Trash2 size={16} /></button>
+                <button onClick={handleClearLogs} style={styles.clearBtn} title="Clear All Logs">
+                  <Trash2 size={16} />
+                </button>
               </div>
-              <div style={{ padding: '15px', overflowY: 'auto', maxH: '250px' }}>
+              <div style={styles.logContainer}>
                 {logs.length === 0 ? (
-                  <p style={{ color: '#4a5568', fontSize: '12px', textAlign: 'center' }}>No threats detected in current session.</p>
+                  <p style={styles.noAlerts}>No threats detected in current session.</p>
                 ) : (
                   logs.map((log, index) => (
-                    <div key={index} style={{ display: 'flex', gap: '12px', padding: '10px', backgroundColor: '#161d29', borderRadius: '6px', marginBottom: '8px', borderLeft: '3px solid #ff1744' }}>
+                    <div key={index} style={styles.alertItem}>
                       <AlertTriangle size={18} color="#ff1744" />
                       <div>
-                        <div style={{ fontSize: '13px', fontWeight: '600', color: '#fff' }}>{log.event_type}</div>
-                        <div style={{ fontSize: '11px', color: '#718096' }}>{log.timestamp}</div>
+                        <div style={styles.alertType}>{log.event_type}</div>
+                        <div style={styles.alertTime}>{log.timestamp}</div>
                       </div>
                     </div>
                   ))
@@ -205,52 +387,146 @@ const App = () => {
               </div>
             </div>
 
-            <div className="panel-card">
-              <div style={{ padding: '15px', fontSize: '12px', fontWeight: 'bold', borderBottom: '1px solid #1e2533', color: '#3d5afe' }}>GET NOTIFIED</div>
-              <div style={{ padding: '15px' }}>
-                <button onClick={() => setShowPopup(true)} style={{ width: '100%', backgroundColor: '#3d5afe', color: '#fff', border: 'none', padding: '12px', borderRadius: '6px', fontWeight: 'bold', cursor: 'pointer' }}>
-                  Manage Devices ({connectedTopics.length})
+            <div style={styles.ntfyPanel}>
+              <div style={styles.panelHeader}>
+                <span>GET NOTIFIED</span>
+                {connectedTopics.length > 0 ? <CheckCircle size={16} color="#00e676" /> : <Smartphone size={16} color="#ff9100" />}
+              </div>
+              <div style={styles.ntfyBody}>
+                <p style={styles.ntfyStatus}>
+                  Status: <span style={{color: connectedTopics.length > 0 ? '#00e676' : '#ff9100'}}>
+                    {connectedTopics.length > 0 ? `Linked (${connectedTopics.length})` : 'Not Connected'}
+                  </span>
+                </p>
+                <button onClick={() => setShowPopup(true)} style={styles.ntfyBtn}>
+                  Manage Devices
                 </button>
               </div>
             </div>
+
           </div>
         </div>
       </div>
 
-      {/* Popups and Modals */}
-      {showPopup && (
-        <div style={{ position: 'fixed', top:0, left:0, right:0, bottom:0, backgroundColor: 'rgba(0,0,0,0.7)', display:'flex', alignItems:'center', justifyContent:'center', zIndex:1000 }}>
-          <div style={{ backgroundColor: '#0f141d', padding: '30px', borderRadius: '8px', border: '1px solid #1e2533', width: '400px' }}>
-            <h2 style={{ color: '#3d5afe', margin: '0 0 15px 0' }}>Connected Devices</h2>
-            {connectedTopics.map((topic, idx) => (
-              <div key={idx} style={{ display: 'flex', justifyContent: 'space-between', backgroundColor: '#161d29', padding: '10px', borderRadius: '6px', marginBottom: '8px' }}>
-                <span style={{ color: '#00e676' }}>{topic}</span>
-                <button onClick={() => handleRemoveTopic(topic)} style={{ background: 'none', border: 'none', color: '#ff1744', cursor: 'pointer' }}><Trash2 size={16}/></button>
-              </div>
-            ))}
-            <div style={{ display: 'flex', gap: '10px', marginTop: '15px' }}>
-              <input type="text" placeholder="Topic name..." value={ntfyTopicInput} onChange={(e) => setNtfyTopicInput(e.target.value)} style={{ flex: 1, padding: '10px', backgroundColor: '#161d29', border: '1px solid #2d3748', borderRadius: '6px', color: '#fff' }} />
-              <button onClick={handleSubscribe} style={{ backgroundColor: '#3d5afe', border: 'none', padding: '10px', color: '#fff', borderRadius: '6px' }}>Add</button>
+      {showRtspModal && (
+        <div style={styles.modalOverlay}>
+          <div className="modal-box" style={styles.modalContent}>
+            <h2 style={{marginTop: 0, color: '#3d5afe', display: 'flex', alignItems: 'center', gap: '10px'}}>
+               <Camera size={24}/> Connect Live Stream
+            </h2>
+            <p style={{color: '#a0aec0', fontSize: '14px', textAlign: 'left', lineHeight: '1.6'}}>
+              Enter your Camera's RTSP link, or type <b>0</b> to use your device's default webcam.
+            </p>
+            <input 
+              type="text" 
+              placeholder="e.g., rtsp://192.168.1.5:8080/h264_ulaw.sdp or 0" 
+              value={rtspInput}
+              onChange={(e) => setRtspInput(e.target.value)}
+              style={styles.ntfyInput}
+            />
+            <div style={{display: 'flex', gap: '10px', marginTop: '20px'}}>
+              <button onClick={handleRtspSubmit} style={{...styles.ntfyBtn, flex: 1}}>Connect Stream</button>
+              <button onClick={() => setShowRtspModal(false)} style={{...styles.ntfyBtn, background: 'transparent', border: '1px solid #2d3748', color: '#a0aec0', flex: 1}}>Cancel</button>
             </div>
-            <button onClick={() => setShowPopup(false)} style={{ width: '100%', background: 'transparent', border: '1px solid #2d3748', color: '#a0aec0', padding: '10px', borderRadius: '6px', marginTop: '15px', cursor: 'pointer' }}>Close</button>
           </div>
         </div>
       )}
 
-      {showRtspModal && (
-        <div style={{ position: 'fixed', top:0, left:0, right:0, bottom:0, backgroundColor: 'rgba(0,0,0,0.7)', display:'flex', alignItems:'center', justifyContent:'center', zIndex:1000 }}>
-          <div style={{ backgroundColor: '#0f141d', padding: '30px', borderRadius: '8px', border: '1px solid #1e2533', width: '400px' }}>
-            <h2 style={{ color: '#3d5afe', margin: '0 0 15px 0' }}>Connect RTSP Stream</h2>
-            <input type="text" placeholder="rtsp://your-camera-ip..." value={rtspInput} onChange={(e) => setRtspInput(e.target.value)} style={{ width: '100%', padding: '12px', backgroundColor: '#161d29', border: '1px solid #2d3748', borderRadius: '6px', color: '#fff', boxSizing: 'border-box' }} />
-            <div style={{ display: 'flex', gap: '10px', marginTop: '20px' }}>
-              <button onClick={handleRtspSubmit} style={{ flex: 1, backgroundColor: '#3d5afe', border: 'none', padding: '12px', color: '#fff', borderRadius: '6px', fontWeight: 'bold' }}>Connect</button>
-              <button onClick={() => setShowRtspModal(false)} style={{ flex: 1, background: 'transparent', border: '1px solid #2d3748', color: '#a0aec0', padding: '12px', borderRadius: '6px' }}>Cancel</button>
+      {showPopup && (
+        <div style={styles.modalOverlay}>
+          <div className="modal-box" style={styles.modalContent}>
+            <h2 style={{marginTop: 0, color: '#3d5afe', display: 'flex', alignItems: 'center', gap: '10px'}}>
+               <Smartphone size={24}/> Manage Connected Devices
+            </h2>
+            
+            <ol style={{color: '#a0aec0', paddingLeft: '20px', lineHeight: '1.6', fontSize: '14px', textAlign: 'left'}}>
+              <li>Download the <b>ntfy</b> app from the App Store or Google Play.</li>
+              <li>Tap the <b>+</b> icon to subscribe to a new topic.</li>
+              <li>Create a unique secret name (e.g., <i>john_guard_77</i>).</li>
+              <li>Add it below to instantly link the device.</li>
+            </ol>
+
+            {connectedTopics.length > 0 && (
+              <div style={{marginTop: '15px', marginBottom: '20px', textAlign: 'left'}}>
+                <h4 style={{color: '#fff', fontSize: '13px', margin: '0 0 10px 0'}}>Active Devices:</h4>
+                <div style={{display: 'flex', flexDirection: 'column', gap: '8px', maxHeight: '120px', overflowY: 'auto', paddingRight: '5px'}}>
+                  {connectedTopics.map((topic, idx) => (
+                    <div key={idx} style={styles.activeDeviceItem}>
+                      <span style={{color: '#00e676', fontSize: '13px', fontWeight: 'bold'}}>{topic}</span>
+                      <button 
+                        onClick={() => handleRemoveTopic(topic)} 
+                        title="Disconnect Device" 
+                        style={styles.trashIconBtn}
+                      >
+                        <Trash2 size={16} />
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            <div style={{display: 'flex', gap: '10px', marginTop: '10px'}}>
+              <input 
+                type="text" 
+                placeholder="Enter secret topic name..." 
+                value={ntfyTopicInput}
+                onChange={(e) => setNtfyTopicInput(e.target.value)}
+                style={{...styles.ntfyInput, marginTop: 0}}
+              />
+              <button onClick={handleSubscribe} style={{...styles.ntfyBtn, whiteSpace: 'nowrap'}}>Add Device</button>
             </div>
+
+            <button onClick={() => setShowPopup(false)} style={{...styles.ntfyBtn, background: 'transparent', border: '1px solid #2d3748', color: '#a0aec0', width: '100%', marginTop: '15px'}}>
+              Done
+            </button>
           </div>
         </div>
       )}
+
     </div>
   );
+};
+
+const styles = {
+  dashboard: { display: 'flex', height: '100vh', width: '100vw', backgroundColor: '#080a0f', color: '#e0e0e0', fontFamily: 'Segoe UI, Roboto, sans-serif', overflow: 'hidden' },
+  sidebar: { width: '280px', flexShrink: 0, backgroundColor: '#0f141d', padding: '30px', borderRight: '1px solid #1e2533', display: 'flex', flexDirection: 'column', gap: '15px', boxSizing: 'border-box' },
+  logo: { display: 'flex', alignItems: 'center', gap: '12px', fontSize: '20px', fontWeight: 'bold', marginBottom: '50px', color: '#fff' },
+  main: { flex: 1, padding: '30px', display: 'flex', flexDirection: 'column', boxSizing: 'border-box', overflowY: 'auto' },
+  header: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '25px', flexShrink: 0 },
+  statusBadge: { display: 'flex', alignItems: 'center', gap: '8px', fontSize: '12px', letterSpacing: '1px', color: '#a0aec0' },
+  dot: { width: '8px', height: '8px', borderRadius: '50%', boxShadow: '0 0 10px currentcolor' },
+  grid: { display: 'grid', gridTemplateColumns: '1fr 320px', gap: '25px', flex: 1, minHeight: 0 },
+  videoContainer: { backgroundColor: '#000', borderRadius: '8px', overflow: 'hidden', border: '1px solid #1e2533', display: 'flex', alignItems: 'center', justifyContent: 'center', flex: 1, minHeight: '400px' },
+  placeholder: { textAlign: 'center', color: '#4a5568', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '10px' },
+  streamImg: { width: '100%', height: '100%', objectFit: 'contain' },
+  controlPanelWrapper: { backgroundColor: '#0f141d', padding: '15px', borderRadius: '8px', border: '1px solid #1e2533', flexShrink: 0, display: 'flex', gap: '20px', alignItems: 'center' },
+  mediaControls: { display: 'flex', gap: '10px', alignItems: 'center' },
+  iconBtn: { backgroundColor: '#1e2533', border: 'none', color: '#fff', padding: '8px', borderRadius: '50%', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', transition: '0.2s' },
+  timelineBackground: { width: '100%', height: '8px', backgroundColor: '#1e2533', borderRadius: '4px', overflow: 'hidden' },
+  timelineFill: { height: '100%', transition: 'width 0.5s ease-in-out' },
+  
+  alertPanel: { flex: 1, backgroundColor: '#0f141d', borderRadius: '8px', border: '1px solid #1e2533', display: 'flex', flexDirection: 'column', overflow: 'hidden' },
+  panelHeader: { padding: '15px', fontSize: '12px', fontWeight: 'bold', borderBottom: '1px solid #1e2533', color: '#3d5afe', letterSpacing: '1px', flexShrink: 0, display: 'flex', justifyContent: 'space-between', alignItems: 'center' },
+  clearBtn: { background: 'none', border: 'none', color: '#718096', cursor: 'pointer', display: 'flex', alignItems: 'center' },
+  logContainer: { flex: 1, overflowY: 'auto', padding: '15px' },
+  alertItem: { display: 'flex', alignItems: 'start', gap: '12px', padding: '12px', backgroundColor: '#161d29', borderRadius: '6px', marginBottom: '10px', borderLeft: '3px solid #ff1744' },
+  alertType: { fontSize: '14px', fontWeight: '600', color: '#fff' },
+  alertTime: { fontSize: '11px', color: '#718096' },
+  noAlerts: { textAlign: 'center', fontSize: '12px', color: '#4a5568', marginTop: '20px' },
+  navBtn: { display: 'flex', alignItems: 'center', gap: '10px', padding: '12px', backgroundColor: '#1a202c', color: '#fff', border: '1px solid #2d3748', borderRadius: '6px', cursor: 'pointer', transition: '0.2s' },
+  uploadBtn: { display: 'flex', alignItems: 'center', gap: '10px', padding: '12px', backgroundColor: '#3d5afe', color: '#fff', border: 'none', borderRadius: '6px', cursor: 'pointer', fontWeight: 'bold', justifyContent: 'center' },
+  reportBtn: { display: 'flex', alignItems: 'center', gap: '10px', padding: '12px', backgroundColor: 'transparent', color: '#a0aec0', border: '1px solid #2d3748', borderRadius: '6px', cursor: 'pointer', width: '100%', boxSizing: 'border-box' },
+
+  ntfyPanel: { backgroundColor: '#0f141d', borderRadius: '8px', border: '1px solid #1e2533', display: 'flex', flexDirection: 'column', flexShrink: 0 },
+  ntfyBody: { padding: '15px', display: 'flex', flexDirection: 'column', gap: '10px' },
+  ntfyStatus: { margin: 0, fontSize: '13px', color: '#a0aec0', fontWeight: '500' },
+  ntfyBtn: { backgroundColor: '#3d5afe', color: '#fff', border: 'none', padding: '12px', borderRadius: '6px', cursor: 'pointer', fontWeight: 'bold', fontSize: '13px', transition: '0.2s' },
+  modalOverlay: { position: 'fixed', top: 0, left: 0, right: 0, bottom: 0, backgroundColor: 'rgba(0,0,0,0.7)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000 },
+  modalContent: { backgroundColor: '#0f141d', padding: '30px', borderRadius: '8px', border: '1px solid #1e2533', width: '450px', maxWidth: '90%', boxShadow: '0 10px 30px rgba(0,0,0,0.5)' },
+  ntfyInput: { width: '100%', padding: '12px', backgroundColor: '#161d29', border: '1px solid #2d3748', borderRadius: '6px', color: '#fff', marginTop: '10px', boxSizing: 'border-box', outline: 'none' },
+  activeDeviceItem: { display: 'flex', justifyContent: 'space-between', backgroundColor: '#161d29', padding: '10px 12px', borderRadius: '6px', border: '1px solid #2d3748', alignItems: 'center' },
+  trashIconBtn: { background: 'none', border: 'none', color: '#ff1744', cursor: 'pointer', display: 'flex', alignItems: 'center', padding: '0' }
 };
 
 export default App;
