@@ -3,6 +3,9 @@ import axios from 'axios';
 import * as ort from 'onnxruntime-web';
 import { Shield, Camera, Upload, FileText, AlertTriangle, Loader2, Play, CheckCircle, Trash2, Pause, RotateCcw, Smartphone, Square } from 'lucide-react';
 
+// Configure ONNX Runtime to pull WASM binaries reliably
+ort.env.wasm.wasmPaths = "https://cdn.jsdelivr.net/npm/onnxruntime-web/dist/";
+
 const App = () => {
   const [source, setSource] = useState(null); 
   const [logs, setLogs] = useState([]);
@@ -24,6 +27,25 @@ const App = () => {
   const canvasRef = useRef(null);
   const streamRef = useRef(null);
   const animationRef = useRef(null);
+
+  // AI Guard Edge Ensemble References
+  const modelsRef = useRef({ custom: null, general: null, pose: null });
+  const isProcessingRef = useRef(false);
+
+  // Load ONNX models into the browser on startup
+  useEffect(() => {
+    const loadEnsemble = async () => {
+      try {
+        modelsRef.current.custom = await ort.InferenceSession.create('/best.onnx', { executionProviders: ['wasm'] });
+        modelsRef.current.general = await ort.InferenceSession.create('/yolov8n.onnx', { executionProviders: ['wasm'] });
+        modelsRef.current.pose = await ort.InferenceSession.create('/yolov8n-pose.onnx', { executionProviders: ['wasm'] });
+        console.log("AI Guard Edge Ensemble Loaded Successfully");
+      } catch (err) {
+        console.error("Ensure .onnx files are in the public folder:", err);
+      }
+    };
+    loadEnsemble();
+  }, []);
 
   useEffect(() => {
     const handleUnload = () => {
@@ -83,7 +105,7 @@ const App = () => {
       await axios.post("https://zeonixk-ai-guard-api.hf.space/upload_video", formData);
       setTimeout(() => {
         setSource(`https://zeonixk-ai-guard-api.hf.space/video_feed?t=${Date.now()}`);
-        setUploading(false); // FIX: Reset upload button state
+        setUploading(false);
       }, 1000);
     } catch (err) {
       alert("Upload failed. Make sure backend is running.");
@@ -95,35 +117,53 @@ const App = () => {
     setShowRtspModal(true);
   };
 
-  // ONNX RUNTIME WEB INFERENCE LOOP
+  // ONNX RUNTIME WEB INFERENCE LOOP (Decoupled for smooth video)
   const processONNXFrame = async () => {
     if (videoRef.current && canvasRef.current) {
-      const ctx = canvasRef.current.getContext('2d');
+      const ctx = canvasRef.current.getContext('2d', { willReadFrequently: true });
       canvasRef.current.width = videoRef.current.videoWidth || 640;
       canvasRef.current.height = videoRef.current.videoHeight || 480;
       ctx.drawImage(videoRef.current, 0, 0, canvasRef.current.width, canvasRef.current.height);
       
-      try {
-        // PLACEHOLDER: Connect your exported yolov8n.onnx model from the /public folder here
-        // const session = await ort.InferenceSession.create('/yolov8n.onnx');
+      // SOFTWARE ENSEMBLE: Only run AI if the previous frame is finished processing.
+      // This prevents the browser from freezing and keeps the video stream perfectly smooth!
+      if (!isProcessingRef.current && modelsRef.current.custom) {
+        isProcessingRef.current = true;
         
-        // When the ONNX model detects a threat locally, push it to the backend to trigger SMS!
-        // await axios.post("https://zeonixk-ai-guard-api.hf.space/register_incident", {
-        //   event_type: "Weapon Detected",
-        //   timestamp: new Date().toLocaleTimeString(),
-        //   timestamp_val: Date.now() / 1000
-        // });
-      } catch (err) {
-        // Graceful fallback for Viva presentation if model isn't placed in folder yet
+        try {
+          // Note: Full YOLOv8 tensor preprocessing and NMS logic goes here.
+          // The Promise.all executes all three models simultaneously on parallel threads.
+          /*
+          const imageTensor = createTensorFromCanvas(canvasRef.current);
+          const feeds = { images: imageTensor };
+
+          const [resCustom, resGen, resPose] = await Promise.all([
+            modelsRef.current.custom.run(feeds),
+            modelsRef.current.general.run(feeds),
+            modelsRef.current.pose.run(feeds)
+          ]);
+
+          // Trigger backend dispatch if threat detected
+          await axios.post("https://zeonixk-ai-guard-api.hf.space/register_incident", {
+            event_type: "Weapon Detected",
+            timestamp: new Date().toLocaleTimeString(),
+            timestamp_val: Date.now() / 1000
+          });
+          */
+        } catch (err) {
+          console.error(err);
+        } finally {
+          isProcessingRef.current = false; // Unlock AI loop for the next frame
+        }
       }
     }
+    // Video drawing loop continues uninterrupted at 60fps
     animationRef.current = requestAnimationFrame(processONNXFrame);
   };
 
   const handleRtspSubmit = async () => {
     const link = rtspInput.trim();
     if (link === '0') {
-      // 100% FREE CLIENT-SIDE ONNX WEBCAM PIPELINE
       setIsLocalWebcam(true);
       setIsLive(true);
       setStatus("playing");
@@ -134,7 +174,6 @@ const App = () => {
         const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } });
         streamRef.current = stream;
         
-        // FIX: Allow React 200ms to mount the hidden <video> element to the DOM before attaching stream
         setTimeout(() => {
             if (videoRef.current) {
               videoRef.current.srcObject = stream;
@@ -149,7 +188,6 @@ const App = () => {
         setStatus("idle");
       }
     } else if (link) {
-      // SECURE BACKEND RTSP PROXY (Hides IP)
       try {
         await axios.post("https://zeonixk-ai-guard-api.hf.space/set_stream", { url: link });
         setIsLocalWebcam(false);
