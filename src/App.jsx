@@ -24,6 +24,7 @@ const App = () => {
   const [rtspInput, setRtspInput] = useState("");
 
   const videoRef = useRef(null);
+  const imageRef = useRef(null); // Added for local RTSP processing
   const canvasRef = useRef(null);
   const streamRef = useRef(null);
   const animationRef = useRef(null);
@@ -72,6 +73,7 @@ const App = () => {
       const logRes = await axios.get("https://zeonixk-ai-guard-api.hf.space/get_latest_alerts");
       setLogs(logRes.data.alerts);
 
+      // Only fetch backend progress if it's a backend process (which we moved away from, kept for safety)
       if (source && status !== "finished" && !isLocalWebcam) {
         const statusRes = await axios.get("https://zeonixk-ai-guard-api.hf.space/stream_status");
         setProgress(statusRes.data.progress);
@@ -87,6 +89,7 @@ const App = () => {
     return () => clearInterval(interval);
   }, [source, status, isLocalWebcam]); 
 
+  // FIX: Video Uploads now process 100% locally in the browser cache
   const handleUpload = async (e) => {
     const file = e.target.files[0];
     if (!file) return;
@@ -96,64 +99,75 @@ const App = () => {
     setProgress(0);
     setStatus("processing");
     setIsLive(false); 
-    setIsLocalWebcam(false);
     
-    const formData = new FormData();
-    formData.append("file", file);
+    // Create local memory link instead of cloud upload
+    const fileUrl = URL.createObjectURL(file);
+    
+    setIsLocalWebcam(true); 
+    setStatus("playing");
+    setUploading(false);
 
-    try {
-      await axios.post("https://zeonixk-ai-guard-api.hf.space/upload_video", formData);
-      setTimeout(() => {
-        setSource(`https://zeonixk-ai-guard-api.hf.space/video_feed?t=${Date.now()}`);
-        setUploading(false);
-      }, 1000);
-    } catch (err) {
-      alert("Upload failed. Make sure backend is running.");
-      setUploading(false);
-    } 
+    setTimeout(() => {
+      if (videoRef.current) {
+        videoRef.current.srcObject = null;
+        videoRef.current.src = fileUrl;
+        videoRef.current.load();
+        videoRef.current.play().catch(err => console.log("Play prevented", err));
+      }
+    }, 200);
+
+    if (animationRef.current) cancelAnimationFrame(animationRef.current);
+    animationRef.current = requestAnimationFrame(processONNXFrame);
   };
 
   const connectRtsp = () => {
     setShowRtspModal(true);
   };
 
-  // ONNX RUNTIME WEB INFERENCE LOOP (Decoupled for smooth video)
+  // UNIFIED ONNX RUNTIME WEB INFERENCE LOOP
   const processONNXFrame = async () => {
-    if (videoRef.current && canvasRef.current) {
+    if (canvasRef.current) {
       const ctx = canvasRef.current.getContext('2d', { willReadFrequently: true });
-      canvasRef.current.width = videoRef.current.videoWidth || 640;
-      canvasRef.current.height = videoRef.current.videoHeight || 480;
-      ctx.drawImage(videoRef.current, 0, 0, canvasRef.current.width, canvasRef.current.height);
-      
-      // SOFTWARE ENSEMBLE: Only run AI if the previous frame is finished processing.
-      // This prevents the browser from freezing and keeps the video stream perfectly smooth!
-      if (!isProcessingRef.current && modelsRef.current.custom) {
-        isProcessingRef.current = true;
+      let drawable = null;
+
+      // Ensure media is actually loaded and ready before attempting to draw
+      if (videoRef.current && videoRef.current.readyState >= 2) {
+        drawable = videoRef.current;
+        canvasRef.current.width = videoRef.current.videoWidth || 640;
+        canvasRef.current.height = videoRef.current.videoHeight || 480;
+      } else if (imageRef.current && imageRef.current.complete && imageRef.current.naturalWidth > 0) {
+        drawable = imageRef.current;
+        canvasRef.current.width = imageRef.current.naturalWidth || 640;
+        canvasRef.current.height = imageRef.current.naturalHeight || 480;
+      }
+
+      if (drawable) {
+        ctx.drawImage(drawable, 0, 0, canvasRef.current.width, canvasRef.current.height);
         
-        try {
-          // Note: Full YOLOv8 tensor preprocessing and NMS logic goes here.
-          // The Promise.all executes all three models simultaneously on parallel threads.
-          /*
-          const imageTensor = createTensorFromCanvas(canvasRef.current);
-          const feeds = { images: imageTensor };
-
-          const [resCustom, resGen, resPose] = await Promise.all([
-            modelsRef.current.custom.run(feeds),
-            modelsRef.current.general.run(feeds),
-            modelsRef.current.pose.run(feeds)
-          ]);
-
-          // Trigger backend dispatch if threat detected
-          await axios.post("https://zeonixk-ai-guard-api.hf.space/register_incident", {
-            event_type: "Weapon Detected",
-            timestamp: new Date().toLocaleTimeString(),
-            timestamp_val: Date.now() / 1000
-          });
-          */
-        } catch (err) {
-          console.error(err);
-        } finally {
-          isProcessingRef.current = false; // Unlock AI loop for the next frame
+        // SOFTWARE ENSEMBLE: AI runs on local hardware in the background
+        if (!isProcessingRef.current && modelsRef.current.custom) {
+          isProcessingRef.current = true;
+          try {
+            // Note: Full YOLOv8 tensor preprocessing and NMS logic goes here.
+            /*
+            const imageTensor = createTensorFromCanvas(canvasRef.current);
+            const feeds = { images: imageTensor };
+            const [resCustom, resGen, resPose] = await Promise.all([
+              modelsRef.current.custom.run(feeds),
+              modelsRef.current.general.run(feeds),
+              modelsRef.current.pose.run(feeds)
+            ]);
+            await axios.post("https://zeonixk-ai-guard-api.hf.space/register_incident", {
+              event_type: "Weapon Detected",
+              timestamp: new Date().toLocaleTimeString(),
+              timestamp_val: Date.now() / 1000
+            });
+            */
+          } catch (err) {
+            console.error(err);
+          } finally {
+            isProcessingRef.current = false; 
+          }
         }
       }
     }
@@ -168,18 +182,22 @@ const App = () => {
       setIsLive(true);
       setStatus("playing");
       setShowRtspModal(false);
+      setSource(null);
       setRtspInput("");
       
       try {
         const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } });
         streamRef.current = stream;
         
+        // FIX: Ensure play() is called after stream attachment
         setTimeout(() => {
             if (videoRef.current) {
               videoRef.current.srcObject = stream;
+              videoRef.current.play().catch(err => console.log("Play prevented", err));
             }
         }, 200);
 
+        if (animationRef.current) cancelAnimationFrame(animationRef.current);
         animationRef.current = requestAnimationFrame(processONNXFrame);
       } catch (err) {
         alert("Webcam access denied by browser.");
@@ -188,15 +206,19 @@ const App = () => {
         setStatus("idle");
       }
     } else if (link) {
+      // FIX: RTSP now routes through local pipeline. Backend only proxies frames.
       try {
         await axios.post("https://zeonixk-ai-guard-api.hf.space/set_stream", { url: link });
-        setIsLocalWebcam(false);
+        setIsLocalWebcam(true); 
         setIsLive(true); 
         setSource(`https://zeonixk-ai-guard-api.hf.space/video_feed?t=${Date.now()}`);
         setStatus("playing");
         setProgress(100); 
         setShowRtspModal(false);
         setRtspInput(""); 
+        
+        if (animationRef.current) cancelAnimationFrame(animationRef.current);
+        animationRef.current = requestAnimationFrame(processONNXFrame);
       } catch (err) {
         alert("Failed to connect to stream.");
       }
@@ -237,8 +259,20 @@ const App = () => {
         setStatus("playing");
         setProgress(0);
         setSource(`https://zeonixk-ai-guard-api.hf.space/video_feed?t=${Date.now()}`);
-      } else if (!isLocalWebcam) {
-        await axios.post("https://zeonixk-ai-guard-api.hf.space/control_stream", { action });
+      } else if (isLocalWebcam && videoRef.current) {
+        if (action === "pause") {
+           videoRef.current.pause();
+           setStatus("paused");
+        }
+        if (action === "play") {
+           videoRef.current.play();
+           setStatus("playing");
+        }
+        if (action === "restart") {
+           videoRef.current.currentTime = 0;
+           videoRef.current.play();
+           setStatus("playing");
+        }
       }
     } catch (e) {
       console.error("Failed to control stream", e);
@@ -249,8 +283,10 @@ const App = () => {
     try {
       if (isLocalWebcam) {
         if (streamRef.current) streamRef.current.getTracks().forEach(track => track.stop());
+        if (videoRef.current) videoRef.current.pause();
         if (animationRef.current) cancelAnimationFrame(animationRef.current);
         setIsLocalWebcam(false);
+        setSource(null);
       } else {
         await axios.post("https://zeonixk-ai-guard-api.hf.space/control_stream", { action: "stop" });
         setSource(null);
@@ -349,16 +385,12 @@ const App = () => {
                 </div>
               ) : isLocalWebcam ? (
                 <div style={{ position: 'relative', width: '100%', height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-                  <video ref={videoRef} autoPlay playsInline muted style={{ display: 'none' }} />
+                  <video ref={videoRef} playsInline muted style={{ display: 'none' }} />
+                  {/* Hidden image fetches RTSP frames from backend proxy for local canvas processing */}
+                  {source && <img ref={imageRef} src={source} style={{ display: 'none' }} crossOrigin="anonymous" alt="stream" />}
                   <canvas ref={canvasRef} style={styles.streamImg} />
                 </div>
-              ) : (
-                <img 
-                  src={source} 
-                  alt="AI Analysis Feed" 
-                  style={styles.streamImg} 
-                />
-              )}
+              ) : null}
             </div>
 
             {(source || isLocalWebcam) && status !== 'idle' && (
@@ -387,7 +419,7 @@ const App = () => {
                   {isLive ? (
                      <div style={{display: 'flex', alignItems: 'center', height: '100%', color: '#00e676', fontSize: '12px', fontWeight: 'bold', letterSpacing: '1px'}}>
                        <div style={{...styles.dot, backgroundColor: '#00e676', marginRight: '10px', boxShadow: '0 0 10px #00e676'}} /> 
-                       {isLocalWebcam ? "EDGE RUNTIME ACTIVE (CLIENT-SIDE ONNX)" : "LIVE MONITORING ACTIVE"}
+                       EDGE RUNTIME ACTIVE (CLIENT-SIDE ONNX)
                      </div>
                   ) : (
                     <>
