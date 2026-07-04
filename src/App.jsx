@@ -3,8 +3,93 @@ import axios from 'axios';
 import * as ort from 'onnxruntime-web';
 import { Shield, Camera, Upload, FileText, AlertTriangle, Loader2, Play, CheckCircle, Trash2, Pause, RotateCcw, Smartphone, Square } from 'lucide-react';
 
-// Configure ONNX Runtime to pull WASM binaries reliably
 ort.env.wasm.wasmPaths = "https://cdn.jsdelivr.net/npm/onnxruntime-web/dist/";
+
+// --- PURE JAVASCRIPT AI TENSOR DECODING ---
+const getIOU = (boxA, boxB) => {
+    let xA = Math.max(boxA.x1, boxB.x1);
+    let yA = Math.max(boxA.y1, boxB.y1);
+    let xB = Math.min(boxA.x2, boxB.x2);
+    let yB = Math.min(boxA.y2, boxB.y2);
+    let interArea = Math.max(0, xB - xA) * Math.max(0, yB - yA);
+    let boxAArea = (boxA.x2 - boxA.x1) * (boxA.y2 - boxA.y1);
+    let boxBArea = (boxB.x2 - boxB.x1) * (boxB.y2 - boxB.y1);
+    return interArea / (boxAArea + boxBArea - interArea + 1e-5);
+};
+
+const runNMS = (boxes, iouThresh) => {
+    boxes.sort((a, b) => b.conf - a.conf);
+    let result = [];
+    for (let i = 0; i < boxes.length; i++) {
+        let box = boxes[i];
+        let keep = true;
+        for (let j = 0; j < result.length; j++) {
+            let rBox = result[j];
+            if (box.classId === rBox.classId && getIOU(box, rBox) > iouThresh) {
+                keep = false; break;
+            }
+        }
+        if (keep) result.push(box);
+    }
+    return result;
+};
+
+const parseYOLO = (tensor, confThresh, allowedClasses, originalW, originalH) => {
+    if (!tensor || !tensor.data || !tensor.dims) return [];
+    const data = tensor.data;
+    const numRows = tensor.dims[1]; 
+    const numCols = tensor.dims[2]; 
+    let boxes = [];
+    const scaleX = originalW / 640.0;
+    const scaleY = originalH / 640.0;
+    
+    for (let c = 0; c < numCols; c++) {
+        let maxConf = 0;
+        let classId = -1;
+        for (let r = 4; r < numRows; r++) {
+            let conf = data[r * numCols + c];
+            if (conf > maxConf) { maxConf = conf; classId = r - 4; }
+        }
+        if (maxConf >= confThresh) {
+            if (allowedClasses && !allowedClasses.includes(classId)) continue;
+            let xc = data[0 * numCols + c] * scaleX;
+            let yc = data[1 * numCols + c] * scaleY;
+            let w = data[2 * numCols + c] * scaleX;
+            let h = data[3 * numCols + c] * scaleY;
+            boxes.push({ x1: xc - w/2, y1: yc - h/2, x2: xc + w/2, y2: yc + h/2, xc, yc, w, h, classId, conf: maxConf });
+        }
+    }
+    return runNMS(boxes, 0.45);
+};
+
+const createTensor = (canvas) => {
+    const tensorW = 640, tensorH = 640;
+    const offCanvas = document.createElement('canvas');
+    offCanvas.width = tensorW; offCanvas.height = tensorH;
+    const offCtx = offCanvas.getContext('2d');
+    offCtx.drawImage(canvas, 0, 0, tensorW, tensorH);
+    const imgData = offCtx.getImageData(0, 0, tensorW, tensorH).data;
+    const float32Data = new Float32Array(3 * tensorW * tensorH);
+    for (let i = 0, j = 0; i < tensorW * tensorH; i++, j+=4) {
+        float32Data[i] = imgData[j] / 255.0; 
+        float32Data[i + tensorW * tensorH] = imgData[j+1] / 255.0; 
+        float32Data[i + 2 * tensorW * tensorH] = imgData[j+2] / 255.0; 
+    }
+    return new ort.Tensor('float32', float32Data, [1, 3, tensorH, tensorW]);
+};
+
+const drawBox = (ctx, box, label, color) => {
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 3;
+    ctx.strokeRect(box.x1, box.y1, box.w, box.h);
+    ctx.fillStyle = color;
+    const textWidth = ctx.measureText(label).width;
+    ctx.fillRect(box.x1, box.y1 > 25 ? box.y1 - 25 : box.y1, textWidth + 10, 25);
+    ctx.fillStyle = "#fff";
+    ctx.font = "bold 12px sans-serif";
+    ctx.fillText(label, box.x1 + 5, box.y1 > 25 ? box.y1 - 8 : box.y1 + 17);
+};
+// ------------------------------------------
 
 const App = () => {
   const [source, setSource] = useState(null); 
@@ -24,7 +109,7 @@ const App = () => {
   const [rtspInput, setRtspInput] = useState("");
 
   const videoRef = useRef(null);
-  const imageRef = useRef(null); // Added for local RTSP processing
+  const imageRef = useRef(null); 
   const canvasRef = useRef(null);
   const streamRef = useRef(null);
   const animationRef = useRef(null);
@@ -32,17 +117,17 @@ const App = () => {
   // AI Guard Edge Ensemble References
   const modelsRef = useRef({ custom: null, general: null, pose: null });
   const isProcessingRef = useRef(false);
+  const activeBoxesRef = useRef({ gen: [], custom: [] });
 
-  // Load ONNX models into the browser on startup
   useEffect(() => {
     const loadEnsemble = async () => {
       try {
-        modelsRef.current.custom = await ort.InferenceSession.create('/best.onnx', { executionProviders: ['wasm'] });
         modelsRef.current.general = await ort.InferenceSession.create('/yolov8n.onnx', { executionProviders: ['wasm'] });
+        modelsRef.current.custom = await ort.InferenceSession.create('/best.onnx', { executionProviders: ['wasm'] });
         modelsRef.current.pose = await ort.InferenceSession.create('/yolov8n-pose.onnx', { executionProviders: ['wasm'] });
         console.log("AI Guard Edge Ensemble Loaded Successfully");
       } catch (err) {
-        console.error("Ensure .onnx files are in the public folder:", err);
+        console.error("Models not found in public folder, or loading error.", err);
       }
     };
     loadEnsemble();
@@ -58,12 +143,8 @@ const App = () => {
           keepalive: true 
         });
       });
-      fetch("https://zeonixk-ai-guard-api.hf.space/clear_logs", {
-        method: "DELETE",
-        keepalive: true
-      });
+      fetch("https://zeonixk-ai-guard-api.hf.space/clear_logs", { method: "DELETE", keepalive: true });
     };
-
     window.addEventListener("beforeunload", handleUnload);
     return () => window.removeEventListener("beforeunload", handleUnload);
   }, [connectedTopics]);
@@ -72,13 +153,6 @@ const App = () => {
     try {
       const logRes = await axios.get("https://zeonixk-ai-guard-api.hf.space/get_latest_alerts");
       setLogs(logRes.data.alerts);
-
-      // Only fetch backend progress if it's a backend process (which we moved away from, kept for safety)
-      if (source && status !== "finished" && !isLocalWebcam) {
-        const statusRes = await axios.get("https://zeonixk-ai-guard-api.hf.space/stream_status");
-        setProgress(statusRes.data.progress);
-        setStatus(statusRes.data.status);
-      }
     } catch (e) {
       console.error("Failed to sync data");
     }
@@ -89,7 +163,6 @@ const App = () => {
     return () => clearInterval(interval);
   }, [source, status, isLocalWebcam]); 
 
-  // FIX: Video Uploads now process 100% locally in the browser cache
   const handleUpload = async (e) => {
     const file = e.target.files[0];
     if (!file) return;
@@ -100,7 +173,6 @@ const App = () => {
     setStatus("processing");
     setIsLive(false); 
     
-    // Create local memory link instead of cloud upload
     const fileUrl = URL.createObjectURL(file);
     
     setIsLocalWebcam(true); 
@@ -120,17 +192,14 @@ const App = () => {
     animationRef.current = requestAnimationFrame(processONNXFrame);
   };
 
-  const connectRtsp = () => {
-    setShowRtspModal(true);
-  };
+  const connectRtsp = () => setShowRtspModal(true);
 
-  // UNIFIED ONNX RUNTIME WEB INFERENCE LOOP
+  // DECOUPLED ONNX RUNTIME LOOP
   const processONNXFrame = async () => {
     if (canvasRef.current) {
       const ctx = canvasRef.current.getContext('2d', { willReadFrequently: true });
       let drawable = null;
 
-      // Ensure media is actually loaded and ready before attempting to draw
       if (videoRef.current && videoRef.current.readyState >= 2) {
         drawable = videoRef.current;
         canvasRef.current.width = videoRef.current.videoWidth || 640;
@@ -142,36 +211,116 @@ const App = () => {
       }
 
       if (drawable) {
+        // Draw the ultra-smooth video
         ctx.drawImage(drawable, 0, 0, canvasRef.current.width, canvasRef.current.height);
         
-        // SOFTWARE ENSEMBLE: AI runs on local hardware in the background
-        if (!isProcessingRef.current && modelsRef.current.custom) {
+        // Execute heavy AI math async so browser doesn't freeze
+        if (!isProcessingRef.current && modelsRef.current.general) {
           isProcessingRef.current = true;
           try {
-            // Note: Full YOLOv8 tensor preprocessing and NMS logic goes here.
-            /*
-            const imageTensor = createTensorFromCanvas(canvasRef.current);
+            const imageTensor = createTensor(canvasRef.current);
             const feeds = { images: imageTensor };
-            const [resCustom, resGen, resPose] = await Promise.all([
-              modelsRef.current.custom.run(feeds),
-              modelsRef.current.general.run(feeds),
-              modelsRef.current.pose.run(feeds)
-            ]);
-            await axios.post("https://zeonixk-ai-guard-api.hf.space/register_incident", {
-              event_type: "Weapon Detected",
-              timestamp: new Date().toLocaleTimeString(),
-              timestamp_val: Date.now() / 1000
+            
+            const promises = [modelsRef.current.general.run(feeds)];
+            if (modelsRef.current.custom) promises.push(modelsRef.current.custom.run(feeds));
+            const results = await Promise.all(promises);
+            
+            const genOutName = Object.keys(results[0])[0];
+            const genBoxes = parseYOLO(results[0][genOutName], 0.40, [0, 24, 26, 28, 43], canvasRef.current.width, canvasRef.current.height);
+            
+            let customBoxes = [];
+            if(results[1]) {
+                const custOutName = Object.keys(results[1])[0];
+                customBoxes = parseYOLO(results[1][custOutName], 0.35, null, canvasRef.current.width, canvasRef.current.height);
+            }
+
+            activeBoxesRef.current = { gen: genBoxes, custom: customBoxes };
+            
+            let currentThreats = [];
+            const persons = genBoxes.filter(b => b.classId === 0);
+            const bags = genBoxes.filter(b => [24,26,28].includes(b.classId));
+            
+            if (persons.length >= 6) currentThreats.push("Dense Crowd Gathering");
+            
+            bags.forEach(bag => {
+                let minDist = 9999;
+                persons.forEach(p => {
+                    const dist = Math.sqrt(Math.pow(bag.xc-p.xc, 2) + Math.pow(bag.yc-p.yc, 2));
+                    if (dist < minDist) minDist = dist;
+                });
+                if (minDist > 150) currentThreats.push("Unattended Object");
             });
-            */
-          } catch (err) {
-            console.error(err);
+            
+            for (let i=0; i<persons.length; i++) {
+                for (let j=i+1; j<persons.length; j++) {
+                    if (getIOU(persons[i], persons[j]) > 0.35) currentThreats.push("Violence / Fighting");
+                }
+            }
+            
+            const customLabels = ["Weapon", "Smoke", "Fire", "Grenade"]; 
+            customBoxes.forEach(b => {
+                let label = customLabels[b.classId] || "Threat";
+                if (label.toLowerCase() !== "grenade") currentThreats.push(label);
+            });
+            
+            const uniqueThreats = [...new Set(currentThreats)];
+            uniqueThreats.forEach(threat => {
+                axios.post("https://zeonixk-ai-guard-api.hf.space/register_incident", {
+                    event_type: threat,
+                    timestamp: new Date().toLocaleTimeString(),
+                    timestamp_val: Date.now() / 1000
+                }).catch(()=>{});
+            });
+          } catch(err) {
+             console.error("AI Inference Error: ", err);
           } finally {
-            isProcessingRef.current = false; 
+            isProcessingRef.current = false;
           }
+        }
+        
+        // DRAW AI OVERLAY CONTINUOUSLY
+        const boxes = activeBoxesRef.current;
+        if (boxes && boxes.gen) {
+            const persons = boxes.gen.filter(b => b.classId === 0);
+            const bags = boxes.gen.filter(b => [24,26,28].includes(b.classId));
+            
+            if (persons.length >= 6) {
+                ctx.fillStyle = "rgba(255, 0, 0, 0.7)";
+                ctx.fillRect(10, 10, 350, 40);
+                ctx.fillStyle = "white";
+                ctx.font = "bold 20px sans-serif";
+                ctx.fillText(`CROWD WARNING (${persons.length} Ppl)`, 20, 38);
+            }
+            
+            let fightingIndices = new Set();
+            for (let i=0; i<persons.length; i++) {
+                for (let j=i+1; j<persons.length; j++) {
+                    if (getIOU(persons[i], persons[j]) > 0.35) {
+                        fightingIndices.add(i);
+                        fightingIndices.add(j);
+                    }
+                }
+            }
+            
+            persons.forEach((p, idx) => {
+                if (fightingIndices.has(idx)) { drawBox(ctx, p, "FIGHT / VIOLENCE", "#ff9100"); } 
+                else { drawBox(ctx, p, "PERSON", "#00e676"); }
+            });
+            
+            bags.forEach(bag => {
+                let minDist = 9999;
+                persons.forEach(p => {
+                    const dist = Math.sqrt(Math.pow(bag.xc-p.xc,2) + Math.pow(bag.yc-p.yc,2));
+                    if (dist < minDist) minDist = dist;
+                });
+                if (minDist > 150) { drawBox(ctx, bag, "UNATTENDED BAG", "#ff1744"); } 
+                else { drawBox(ctx, bag, "BAG", "#3d5afe"); }
+            });
+            
+            boxes.custom.forEach(b => drawBox(ctx, b, "THREAT DETECTED", "#ff1744"));
         }
       }
     }
-    // Video drawing loop continues uninterrupted at 60fps
     animationRef.current = requestAnimationFrame(processONNXFrame);
   };
 
@@ -189,7 +338,6 @@ const App = () => {
         const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } });
         streamRef.current = stream;
         
-        // FIX: Ensure play() is called after stream attachment
         setTimeout(() => {
             if (videoRef.current) {
               videoRef.current.srcObject = stream;
@@ -201,12 +349,9 @@ const App = () => {
         animationRef.current = requestAnimationFrame(processONNXFrame);
       } catch (err) {
         alert("Webcam access denied by browser.");
-        setIsLocalWebcam(false);
-        setIsLive(false);
-        setStatus("idle");
+        setIsLocalWebcam(false); setIsLive(false); setStatus("idle");
       }
     } else if (link) {
-      // FIX: RTSP now routes through local pipeline. Backend only proxies frames.
       try {
         await axios.post("https://zeonixk-ai-guard-api.hf.space/set_stream", { url: link });
         setIsLocalWebcam(true); 
@@ -231,52 +376,30 @@ const App = () => {
     try {
       await axios.delete("https://zeonixk-ai-guard-api.hf.space/clear_logs");
       setLogs([]);
-    } catch (e) {
-      console.error("Failed to clear logs", e);
-    }
+    } catch (e) { console.error("Failed to clear logs", e); }
   };
 
   const handleDownloadReport = async () => {
     try {
-      const response = await axios.get("https://zeonixk-ai-guard-api.hf.space/download_final_report", {
-        responseType: 'blob', 
-      });
+      const response = await axios.get("https://zeonixk-ai-guard-api.hf.space/download_final_report", { responseType: 'blob' });
       const url = window.URL.createObjectURL(new Blob([response.data]));
       const link = document.createElement('a');
       link.href = url;
       link.setAttribute('download', `Security_NLP_Report_${new Date().getTime()}.pdf`);
-      document.body.appendChild(link);
-      link.click();
-      link.parentNode.removeChild(link);
-    } catch (e) {
-      console.error("Download failed", e);
-    }
+      document.body.appendChild(link); link.click(); link.parentNode.removeChild(link);
+    } catch (e) { console.error("Download failed", e); }
   };
 
   const handleMediaControl = async (action) => {
     try {
       if (action === "restart" && !isLocalWebcam) {
-        setStatus("playing");
-        setProgress(0);
-        setSource(`https://zeonixk-ai-guard-api.hf.space/video_feed?t=${Date.now()}`);
+        setStatus("playing"); setProgress(0); setSource(`https://zeonixk-ai-guard-api.hf.space/video_feed?t=${Date.now()}`);
       } else if (isLocalWebcam && videoRef.current) {
-        if (action === "pause") {
-           videoRef.current.pause();
-           setStatus("paused");
-        }
-        if (action === "play") {
-           videoRef.current.play();
-           setStatus("playing");
-        }
-        if (action === "restart") {
-           videoRef.current.currentTime = 0;
-           videoRef.current.play();
-           setStatus("playing");
-        }
+        if (action === "pause") { videoRef.current.pause(); setStatus("paused"); }
+        if (action === "play") { videoRef.current.play(); setStatus("playing"); }
+        if (action === "restart") { videoRef.current.currentTime = 0; videoRef.current.play(); setStatus("playing"); }
       }
-    } catch (e) {
-      console.error("Failed to control stream", e);
-    }
+    } catch (e) { console.error("Failed to control stream", e); }
   };
 
   const handleStopStream = async () => {
@@ -285,45 +408,31 @@ const App = () => {
         if (streamRef.current) streamRef.current.getTracks().forEach(track => track.stop());
         if (videoRef.current) videoRef.current.pause();
         if (animationRef.current) cancelAnimationFrame(animationRef.current);
-        setIsLocalWebcam(false);
-        setSource(null);
+        setIsLocalWebcam(false); setSource(null);
       } else {
         await axios.post("https://zeonixk-ai-guard-api.hf.space/control_stream", { action: "stop" });
         setSource(null);
       }
-      setStatus("idle");
-      setProgress(0);
-      setIsLive(false);
-    } catch (e) {
-      console.error("Failed to stop stream", e);
-    }
+      setStatus("idle"); setProgress(0); setIsLive(false);
+    } catch (e) { console.error("Failed to stop stream", e); }
   };
 
   const handleSubscribe = async () => {
     const newTopic = ntfyTopicInput.trim();
     if (!newTopic) return;
-    
-    if (connectedTopics.includes(newTopic)) {
-      return alert("This device is already connected!");
-    }
+    if (connectedTopics.includes(newTopic)) return alert("This device is already connected!");
 
     try {
       await axios.post("https://zeonixk-ai-guard-api.hf.space/subscribe_ntfy", { topic: newTopic });
-      setConnectedTopics([...connectedTopics, newTopic]); 
-      setNtfyTopicInput(""); 
-    } catch (e) {
-      console.error("Subscription failed", e);
-      alert("Failed to connect. Please check your backend connection.");
-    }
+      setConnectedTopics([...connectedTopics, newTopic]); setNtfyTopicInput(""); 
+    } catch (e) { alert("Failed to connect. Please check your backend connection."); }
   };
 
   const handleRemoveTopic = async (topicToRemove) => {
     try {
       await axios.post("https://zeonixk-ai-guard-api.hf.space/unsubscribe_ntfy", { topic: topicToRemove });
       setConnectedTopics(connectedTopics.filter(t => t !== topicToRemove));
-    } catch (e) {
-      console.error("Failed to disconnect", e);
-    }
+    } catch (e) { console.error("Failed to disconnect", e); }
   };
 
   return (
@@ -385,8 +494,7 @@ const App = () => {
                 </div>
               ) : isLocalWebcam ? (
                 <div style={{ position: 'relative', width: '100%', height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-                  <video ref={videoRef} playsInline muted style={{ display: 'none' }} />
-                  {/* Hidden image fetches RTSP frames from backend proxy for local canvas processing */}
+                  <video ref={videoRef} playsInline muted loop style={{ display: 'none' }} />
                   {source && <img ref={imageRef} src={source} style={{ display: 'none' }} crossOrigin="anonymous" alt="stream" />}
                   <canvas ref={canvasRef} style={styles.streamImg} />
                 </div>
