@@ -83,6 +83,7 @@ const App = () => {
       await axios.post("https://zeonixk-ai-guard-api.hf.space/upload_video", formData);
       setTimeout(() => {
         setSource(`https://zeonixk-ai-guard-api.hf.space/video_feed?t=${Date.now()}`);
+        setUploading(false); // FIX: Reset upload button state
       }, 1000);
     } catch (err) {
       alert("Upload failed. Make sure backend is running.");
@@ -132,9 +133,14 @@ const App = () => {
       try {
         const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } });
         streamRef.current = stream;
-        if (videoRef.current) {
-          videoRef.current.srcObject = stream;
-        }
+        
+        // FIX: Allow React 200ms to mount the hidden <video> element to the DOM before attaching stream
+        setTimeout(() => {
+            if (videoRef.current) {
+              videoRef.current.srcObject = stream;
+            }
+        }, 200);
+
         animationRef.current = requestAnimationFrame(processONNXFrame);
       } catch (err) {
         alert("Webcam access denied by browser.");
